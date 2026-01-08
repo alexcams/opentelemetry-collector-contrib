@@ -1,0 +1,60 @@
+type: profiling
+
+status:
+  class: processor
+  stability:
+    development: [logs, metrics, traces]
+  codeowners:
+    active: [alexcams] #not a community member yet.
+
+tests:
+  config:
+
+attributes:
+  error_type:
+    description: Type of error encountered (permanent or transient)
+    type: string
+    enum: [permanent, transient]
+  label:
+    description: Label identifying the pipeline segment being measured
+    type: string
+
+telemetry:
+  metrics:
+    processor_profiling_error_count:
+      enabled: true
+      description: Total number of errors in the profiled pipeline segment by type
+      stability:
+        level: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+      attributes: [label, error_type]
+    processor_profiling_payload_size:
+      enabled: true
+      description: Distribution of payload sizes in bytes
+      stability:
+        level: development
+      unit: "Bytes"
+      histogram:
+        value_type: int
+      attributes: [label]
+    processor_profiling_success_rate:
+      enabled: true
+      description: Success rate of the profiled pipeline segment
+      stability:
+        level: development
+      unit: "%"
+      gauge:
+        value_type: double
+      attributes: [label]
+    processor_profiling_throughput:
+      enabled: true
+      description: Throughput of the profiled pipeline segment in items per second
+      stability:
+        level: development
+      unit: "kB/s"
+      gauge:
+        value_type: double
+      attributes: [label]
