@@ -41,7 +41,7 @@ func createExtractPercentileMetricFunction(_ ottl.FunctionContext, oArgs ottl.Ar
 
 func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (ottl.ExprFunc[*ottlmetric.TransformContext], error) {
 	var metricNameSuffix string
-	if !suffix.IsEmpty() {
+	if !suffix.IsEmpty() && suffix.Get() != "" {
 		metricNameSuffix = suffix.Get()
 	} else {
 		metricNameSuffix = fmt.Sprintf("_p%g", percentile)
@@ -56,7 +56,11 @@ func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (
 		}
 
 		percentileMetric := pmetric.NewMetric()
-		percentileMetric.SetDescription(fmt.Sprintf("%s (p%g)", metric.Description(), percentile))
+		if metric.Description() != "" {
+			percentileMetric.SetDescription(fmt.Sprintf("%s (p%g)", metric.Description(), percentile))
+		} else {
+			percentileMetric.SetDescription(fmt.Sprintf("p%g", percentile))
+		}
 		percentileMetric.SetName(metric.Name() + metricNameSuffix)
 		percentileMetric.SetUnit(metric.Unit())
 		percentileMetric.SetEmptyGauge()
@@ -90,6 +94,9 @@ func extractPercentileFromDataPoints[T dataPoint[T]](dataPoints dataPointSlice[T
 func addPercentileDataPoint[T dataPoint[T]](sourceDP T, percentileValue float64, destination pmetric.NumberDataPointSlice) {
 	newDp := destination.AppendEmpty()
 	sourceDP.Attributes().CopyTo(newDp.Attributes())
+	if math.IsNaN(percentileValue) {
+		newDp.SetFlags(pmetric.DefaultDataPointFlags.WithNoRecordedValue(true))
+	}
 	newDp.SetDoubleValue(percentileValue)
 	newDp.SetStartTimestamp(sourceDP.StartTimestamp())
 	newDp.SetTimestamp(sourceDP.Timestamp())
@@ -121,7 +128,7 @@ func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile floa
 					lowerBound = dp.Min()
 				} else if 0 > upperBound {
 					// If 0 > upperBound and no valid Min is set,
-					// return the upperBound as it's the minim value we have and we can't interpolate with -Inf.
+					// return the upperBound as it's the minimum value we have, and we can't interpolate with -Inf.
 					return upperBound
 				}
 			} else {
