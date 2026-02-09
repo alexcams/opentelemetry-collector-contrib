@@ -64,13 +64,9 @@ func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (
 
 		switch metric.Type() {
 		case pmetric.MetricTypeHistogram:
-			if err := extractPercentileFromDataPoints(metric.Histogram().DataPoints(), percentile, gaugeDataPoints, calculateHistogramPercentile); err != nil {
-				return nil, err
-			}
+			extractPercentileFromDataPoints(metric.Histogram().DataPoints(), percentile, gaugeDataPoints, calculateHistogramPercentile)
 		case pmetric.MetricTypeExponentialHistogram:
-			if err := extractPercentileFromDataPoints(metric.ExponentialHistogram().DataPoints(), percentile, gaugeDataPoints, calculateExponentialHistogramPercentile); err != nil {
-				return nil, err
-			}
+			extractPercentileFromDataPoints(metric.ExponentialHistogram().DataPoints(), percentile, gaugeDataPoints, calculateExponentialHistogramPercentile)
 		default:
 			return nil, nil
 		}
@@ -83,16 +79,12 @@ func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (
 	}, nil
 }
 
-func extractPercentileFromDataPoints[T dataPoint[T]](dataPoints dataPointSlice[T], percentile float64, destination pmetric.NumberDataPointSlice, calculateFunc func(T, float64) (float64, error)) error {
+func extractPercentileFromDataPoints[T dataPoint[T]](dataPoints dataPointSlice[T], percentile float64, destination pmetric.NumberDataPointSlice, calculateFunc func(T, float64) float64) {
 	for i := range dataPoints.Len() {
 		dp := dataPoints.At(i)
-		percentileValue, err := calculateFunc(dp, percentile)
-		if err != nil {
-			return err
-		}
+		percentileValue := calculateFunc(dp, percentile)
 		addPercentileDataPoint(dp, percentileValue, destination)
 	}
-	return nil
 }
 
 func addPercentileDataPoint[T dataPoint[T]](sourceDP T, percentileValue float64, destination pmetric.NumberDataPointSlice) {
@@ -103,14 +95,17 @@ func addPercentileDataPoint[T dataPoint[T]](sourceDP T, percentileValue float64,
 	newDp.SetTimestamp(sourceDP.Timestamp())
 }
 
-func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile float64) (float64, error) {
+func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile float64) float64 {
 	if dp.Count() == 0 || dp.BucketCounts().Len() == 0 || dp.ExplicitBounds().Len() == 0 {
-		return math.NaN(), nil
+		return math.NaN()
 	}
 
 	targetCount := uint64(math.Ceil(float64(dp.Count()) * (percentile / 100.0)))
 	bucketCounts := dp.BucketCounts()
 	explicitBounds := dp.ExplicitBounds()
+	if bucketCounts.Len() != explicitBounds.Len()+1 {
+		return math.NaN()
+	}
 
 	var cumulativeCount uint64
 	for bucketIdx := range bucketCounts.Len() {
@@ -120,8 +115,15 @@ func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile floa
 		if cumulativeCount >= targetCount {
 			var lowerBound, upperBound float64
 			if bucketIdx == 0 {
-				lowerBound = 0
 				upperBound = explicitBounds.At(0)
+				lowerBound = 0
+				if dp.HasMin() && dp.Min() < upperBound {
+					lowerBound = dp.Min()
+				} else if 0 > upperBound {
+					// If 0 > upperBound and no valid Min is set,
+					// return the upperBound as it's the minim value we have and we can't interpolate with -Inf.
+					return upperBound
+				}
 			} else {
 				lowerBound = explicitBounds.At(bucketIdx - 1)
 				if bucketIdx < explicitBounds.Len() {
@@ -131,7 +133,7 @@ func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile floa
 					// Use Max for interpolation if available; otherwise return lowerBound.
 					// https://opentelemetry.io/docs/specs/otel/metrics/data-model/#histogram-bucket-inclusivity
 					if !dp.HasMax() || dp.Max() <= lowerBound {
-						return lowerBound, nil
+						return lowerBound
 					}
 					upperBound = dp.Max()
 				}
@@ -140,22 +142,15 @@ func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile floa
 			// Linear interpolation within bucket. Note: this is a simplification and assumes uniform distribution within the bucket.
 			bucketCount := bucketCounts.At(bucketIdx)
 			ratio := float64(targetCount-previousCumulativeCount) / float64(bucketCount)
-			return linearInterpolation(lowerBound, upperBound, ratio), nil
+			return linearInterpolation(lowerBound, upperBound, ratio)
 		}
 	}
-	return 0, fmt.Errorf(
-		"percentile p%.2f not found in histogram buckets:"+
-			" targetCount=%d, totalCount=%d, total cumulative count=%d (malformed data: cumulative count doesn't reach target)",
-		percentile,
-		targetCount,
-		dp.Count(),
-		cumulativeCount,
-	)
+	return math.NaN() // In case of malformed data where cumulative count doesn't reach target count
 }
 
-func calculateExponentialHistogramPercentile(dp pmetric.ExponentialHistogramDataPoint, percentile float64) (float64, error) {
+func calculateExponentialHistogramPercentile(dp pmetric.ExponentialHistogramDataPoint, percentile float64) float64 {
 	if dp.Count() == 0 || (dp.Negative().BucketCounts().Len() == 0 && dp.Positive().BucketCounts().Len() == 0 && dp.ZeroCount() == 0) {
-		return math.NaN(), nil
+		return math.NaN()
 	}
 
 	targetCount := uint64(math.Ceil(float64(dp.Count()) * (percentile / 100.0)))
@@ -170,19 +165,23 @@ func calculateExponentialHistogramPercentile(dp pmetric.ExponentialHistogramData
 		previousCumulativeCount := negativeTotalCount
 		negativeTotalCount += negativeBuckets.BucketCounts().At(i)
 		if negativeTotalCount >= targetCount {
-			return calculateFromNegativeBuckets(negativeBuckets, targetCount, previousCumulativeCount, i, scale), nil
+			return calculateFromNegativeBuckets(negativeBuckets, targetCount, previousCumulativeCount, i, scale)
 		}
 	}
 
 	cumulativeAfterZero := negativeTotalCount + zeroCount
 	if cumulativeAfterZero >= targetCount {
-		return calculateFromZeroBucket(dp, negativeBuckets.BucketCounts().Len() != 0, positiveBuckets.BucketCounts().Len() != 0, targetCount, negativeTotalCount, zeroCount), nil
+		return calculateFromZeroBucket(dp, negativeBuckets.BucketCounts().Len() != 0, positiveBuckets.BucketCounts().Len() != 0, targetCount, negativeTotalCount, zeroCount)
 	}
 
 	return calculateFromPositiveBuckets(positiveBuckets, targetCount, cumulativeAfterZero, scale, percentile)
 }
 
 func calculateFromZeroBucket(dp pmetric.ExponentialHistogramDataPoint, negativeBuckets, positiveBuckets bool, targetCount, negativeTotalCount, zeroCount uint64) float64 {
+	if zeroCount == 0 {
+		return math.NaN()
+	}
+
 	zeroBucketLower := -dp.ZeroThreshold()
 	zeroBucketUpper := dp.ZeroThreshold()
 
@@ -200,17 +199,23 @@ func calculateFromZeroBucket(dp pmetric.ExponentialHistogramDataPoint, negativeB
 
 func calculateFromNegativeBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, previousCumulativeCount uint64, bucketIdx, scale int) float64 {
 	bucketCount := buckets.BucketCounts().At(bucketIdx)
+	if bucketCount == 0 {
+		return math.NaN()
+	}
 	bucketIndex := int(buckets.Offset()) + bucketIdx
 
 	upperBound := calculateExponentialBucketBound(bucketIndex, scale)
 	lowerBound := calculateExponentialBucketBound(bucketIndex+1, scale)
+	if -upperBound <= -lowerBound {
+		return math.NaN()
+	}
 
-	ratio := (float64(targetCount) - float64(previousCumulativeCount)) / float64(bucketCount)
+	ratio := (float64(targetCount - previousCumulativeCount)) / float64(bucketCount)
 	// For negative buckets, invert ratio direction since we move from less negative to more negative
 	return -logarithmicInterpolation(upperBound, lowerBound, 1-ratio)
 }
 
-func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int, percentile float64) (float64, error) {
+func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int, percentile float64) float64 {
 	bucketCounts := buckets.BucketCounts()
 
 	cumulativeCount := cumulativeBefore
@@ -225,28 +230,28 @@ func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointB
 			upperBound := calculateExponentialBucketBound(bucketIndex+1, scale)
 
 			ratio := float64(targetCount-previousCumulativeCount) / float64(bucketCount)
-
-			return logarithmicInterpolation(lowerBound, upperBound, ratio), nil
+			return logarithmicInterpolation(lowerBound, upperBound, ratio)
 		}
 	}
 
-	return 0, fmt.Errorf("percentile p%.2f not found in positive buckets for exponential histogram:"+
-		" targetCount=%d, total count=%d (malformed data: cumulative count doesn't reach target count corresponding to percentile)",
-		percentile,
-		targetCount,
-		cumulativeCount,
-	)
+	return math.NaN()
 }
 
 // linearInterpolation performs linear interpolation between two bounds.
 // Assumes uniform distribution of observations within the bucket.
 func linearInterpolation(lowerBound, upperBound, ratio float64) float64 {
+	if ratio < 0 || ratio > 1 {
+		return math.NaN()
+	}
 	return lowerBound + ratio*(upperBound-lowerBound)
 }
 
 // logarithmicInterpolation performs logarithmic interpolation between two bounds,
 // appropriate for exponential histograms.
 func logarithmicInterpolation(lowerBound, upperBound, ratio float64) float64 {
+	if ratio < 0 || ratio > 1 || lowerBound <= 0 || upperBound <= 0 || math.IsNaN(lowerBound) || math.IsNaN(upperBound) {
+		return math.NaN()
+	}
 	logLower := math.Log2(lowerBound)
 	logUpper := math.Log2(upperBound)
 	return math.Exp2(logLower + (logUpper-logLower)*ratio)

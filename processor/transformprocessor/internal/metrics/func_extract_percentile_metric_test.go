@@ -217,13 +217,13 @@ func Test_extractPercentileMetric_Histogram(t *testing.T) {
 			name: "single bucket histogram p75",
 			histogramConfig: histogramConfig{
 				name:           "simple",
-				count:          40,
-				bucketCounts:   []uint64{40},
+				count:          41,
+				bucketCounts:   []uint64{40, 1},
 				explicitBounds: []float64{100.0},
 			},
 			percentile: 75.0,
 			wantSuffix: "_p75",
-			wantValue:  75.0,
+			wantValue:  77.5,
 		},
 		{
 			name: "many buckets p90",
