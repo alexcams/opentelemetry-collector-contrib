@@ -161,7 +161,7 @@ func calculateExponentialHistogramPercentile(dp pmetric.ExponentialHistogramData
 	positiveBuckets := dp.Positive()
 
 	var negativeTotalCount uint64
-	for i := range negativeBuckets.BucketCounts().Len() {
+	for i := negativeBuckets.BucketCounts().Len() - 1; i >= 0; i-- {
 		previousCumulativeCount := negativeTotalCount
 		negativeTotalCount += negativeBuckets.BucketCounts().At(i)
 		if negativeTotalCount >= targetCount {

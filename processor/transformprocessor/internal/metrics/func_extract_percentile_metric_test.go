@@ -251,6 +251,31 @@ func Test_extractPercentileMetric_Histogram(t *testing.T) {
 			wantSuffix: "_p50",
 			wantValue:  10.0,
 		},
+		{
+			name: "first bucket with negative bound and no min",
+			histogramConfig: histogramConfig{
+				name:           "all_negative",
+				count:          100,
+				bucketCounts:   []uint64{100, 0},
+				explicitBounds: []float64{-5.0},
+			},
+			percentile: 50.0,
+			wantSuffix: "_p50",
+			wantValue:  -5.0,
+		},
+		{
+			name: "first bucket with negative bound but valid min",
+			histogramConfig: histogramConfig{
+				name:           "negative_with_min",
+				count:          100,
+				bucketCounts:   []uint64{100, 0},
+				explicitBounds: []float64{-5.0},
+				min:            ottl.NewTestingOptional(-10.0),
+			},
+			percentile: 50.0,
+			wantSuffix: "_p50",
+			wantValue:  -7.5, // Interpolates between min (-10) and upperBound (-5)
+		},
 	}
 
 	for _, tt := range tests {
@@ -411,7 +436,7 @@ func Test_extractPercentileMetric_ExponentialHistogram(t *testing.T) {
 			},
 			percentile: 25.0,
 			wantSuffix: "_p25",
-			wantValue:  -3.2813414240305523, // scale 0, bucket 1: [-2.0, -4.0]
+			wantValue:  -4.756828, // scale 0, bucket -2: [-4, -8]
 		},
 		{
 			name: "p99 with timestamps",
