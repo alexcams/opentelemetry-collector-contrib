@@ -174,7 +174,7 @@ func calculateExponentialHistogramPercentile(dp pmetric.ExponentialHistogramData
 		return calculateFromZeroBucket(dp, negativeBuckets.BucketCounts().Len() != 0, positiveBuckets.BucketCounts().Len() != 0, targetCount, negativeTotalCount, zeroCount)
 	}
 
-	return calculateFromPositiveBuckets(positiveBuckets, targetCount, cumulativeAfterZero, scale, percentile)
+	return calculateFromPositiveBuckets(positiveBuckets, targetCount, cumulativeAfterZero, scale)
 }
 
 func calculateFromZeroBucket(dp pmetric.ExponentialHistogramDataPoint, negativeBuckets, positiveBuckets bool, targetCount, negativeTotalCount, zeroCount uint64) float64 {
@@ -215,7 +215,7 @@ func calculateFromNegativeBuckets(buckets pmetric.ExponentialHistogramDataPointB
 	return -logarithmicInterpolation(upperBound, lowerBound, 1-ratio)
 }
 
-func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int, percentile float64) float64 {
+func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int) float64 {
 	bucketCounts := buckets.BucketCounts()
 
 	cumulativeCount := cumulativeBefore
