@@ -14,8 +14,6 @@ import (
 )
 
 func TestBase64Encode(t *testing.T) {
-	testValue := pcommon.NewValueStr("test string")
-
 	type testCase struct {
 		name          string
 		value         any
@@ -36,7 +34,7 @@ func TestBase64Encode(t *testing.T) {
 		},
 		{
 			name:  "convert Value to base64 (default variant)",
-			value: testValue,
+			value: pcommon.NewValueStr("test string"),
 			want:  "dGVzdCBzdHJpbmc=",
 		},
 		{
