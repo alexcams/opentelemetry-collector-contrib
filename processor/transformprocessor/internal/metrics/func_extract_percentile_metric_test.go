@@ -185,7 +185,28 @@ func Test_extractPercentileMetric_Histogram(t *testing.T) {
 		suffix          ottl.Optional[string]
 		wantSuffix      string
 		wantValue       float64
+		wantSkip        bool
 	}{
+		{
+			name: "skip: zero count",
+			histogramConfig: histogramConfig{
+				name:           "empty_count",
+				count:          0,
+				bucketCounts:   []uint64{0, 0},
+				explicitBounds: []float64{1.0},
+			},
+			percentile: 50.0,
+			wantSkip:   true,
+		},
+		{
+			name: "skip: no bucket counts",
+			histogramConfig: histogramConfig{
+				name:  "no_buckets",
+				count: 10,
+			},
+			percentile: 50.0,
+			wantSkip:   true,
+		},
 		{
 			name: "p50 in first bucket",
 			histogramConfig: histogramConfig{
@@ -328,6 +349,10 @@ func Test_extractPercentileMetric_Histogram(t *testing.T) {
 			_, err = exprFunc(t.Context(), tCtx)
 			require.NoError(t, err)
 
+			if tt.wantSkip {
+				assert.Equal(t, 1, tCtx.GetMetrics().Len(), "should only have original metric")
+				return
+			}
 			validatePercentileMetric(t, tCtx, metric, tt.wantSuffix, tt.wantValue)
 		})
 	}
@@ -394,7 +419,28 @@ func Test_extractPercentileMetric_ExponentialHistogram(t *testing.T) {
 		suffix                     ottl.Optional[string]
 		wantSuffix                 string
 		wantValue                  float64
+		wantSkip                   bool
 	}{
+		{
+			name: "skip: zero count",
+			exponentialHistogramConfig: exponentialHistogramConfig{
+				name:  "empty_count",
+				scale: 0,
+				count: 0,
+			},
+			percentile: 50.0,
+			wantSkip:   true,
+		},
+		{
+			name: "skip: no buckets and no zero count",
+			exponentialHistogramConfig: exponentialHistogramConfig{
+				name:  "no_buckets",
+				scale: 0,
+				count: 10,
+			},
+			percentile: 50.0,
+			wantSkip:   true,
+		},
 		{
 			name: "p50 with scale 0",
 			exponentialHistogramConfig: exponentialHistogramConfig{
@@ -546,6 +592,10 @@ func Test_extractPercentileMetric_ExponentialHistogram(t *testing.T) {
 			_, err = exprFunc(t.Context(), tCtx)
 			require.NoError(t, err)
 
+			if tt.wantSkip {
+				assert.Equal(t, 1, tCtx.GetMetrics().Len(), "should only have original metric")
+				return
+			}
 			validatePercentileMetric(t, tCtx, metric, tt.wantSuffix, tt.wantValue)
 		})
 	}
@@ -578,4 +628,76 @@ func validatePercentileMetric(t *testing.T, tCtx *ottlmetric.TransformContext, o
 
 	assert.Equal(t, originalDataPoint.Attributes().Len(), gaugeDataPoint.Attributes().Len(), "attributes should be copied")
 	assert.Equal(t, originalDataPoint.Timestamp(), gaugeDataPoint.Timestamp(), "timestamp should be copied")
+}
+
+func Test_extractPercentileMetric_MalformedData(t *testing.T) {
+	tests := []struct {
+		name       string
+		metric     func() pmetric.Metric
+		percentile float64
+		wantErr    string
+	}{
+		{
+			name: "histogram: bucketCounts/explicitBounds length mismatch",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("bad_histogram")
+				m.SetEmptyHistogram()
+				dp := m.Histogram().DataPoints().AppendEmpty()
+				dp.SetCount(10)
+				dp.BucketCounts().FromRaw([]uint64{5, 5})        // len=2
+				dp.ExplicitBounds().FromRaw([]float64{1.0, 2.0}) // len=2, should be len=1
+				return m
+			},
+			percentile: 50.0,
+			wantErr:    "calculating histogram percentile: malformed data: bucketCounts length (2) != explicitBounds length (2) + 1",
+		},
+		{
+			name: "histogram: cumulative count doesn't reach target",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("bad_histogram")
+				m.SetEmptyHistogram()
+				dp := m.Histogram().DataPoints().AppendEmpty()
+				dp.SetCount(100)                          // claims 100 observations
+				dp.BucketCounts().FromRaw([]uint64{5, 5}) // but only 10 in buckets
+				dp.ExplicitBounds().FromRaw([]float64{1.0})
+				return m
+			},
+			percentile: 50.0,
+			wantErr:    "calculating histogram percentile: malformed data: cumulative count doesn't reach target count corresponding to percentile. targetCount=50, total count=10",
+		},
+		{
+			name: "exponential histogram: cumulative count doesn't reach target",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("bad_exp_histogram")
+				m.SetEmptyExponentialHistogram()
+				dp := m.ExponentialHistogram().DataPoints().AppendEmpty()
+				dp.SetCount(100) // claims 100 observations
+				dp.SetScale(0)
+				dp.Positive().BucketCounts().FromRaw([]uint64{5, 5}) // but only 10
+				return m
+			},
+			percentile: 50.0,
+			wantErr:    "calculating exponential histogram percentile: malformed data: cumulative count doesn't reach target count corresponding to percentile. targetCount=50, total count=10",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metric := tt.metric()
+
+			exprFunc, err := extractPercentileMetric(tt.percentile, ottl.Optional[string]{})
+			require.NoError(t, err)
+
+			scopeMetrics := pmetric.NewScopeMetrics()
+			metric.CopyTo(scopeMetrics.Metrics().AppendEmpty())
+
+			tCtx := ottlmetric.NewTransformContextPtr(pmetric.NewResourceMetrics(), scopeMetrics, metric)
+
+			_, err = exprFunc(t.Context(), tCtx)
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
 }
