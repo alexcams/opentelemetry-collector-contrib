@@ -218,8 +218,8 @@ func calculateFromNegativeBuckets(buckets pmetric.ExponentialHistogramDataPointB
 	}
 
 	ratio := (float64(targetCount - previousCumulativeCount)) / float64(bucketCount)
-	// For negative buckets, invert ratio direction since we move from less negative to more negative
-	return -logarithmicInterpolation(upperBound, lowerBound, 1-ratio)
+	// For negative buckets, invert ratio direction since we move from more negative to less negative.
+	return -logarithmicInterpolation(lowerBound, upperBound, ratio)
 }
 
 func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int) float64 {
