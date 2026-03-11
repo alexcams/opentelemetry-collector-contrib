@@ -531,7 +531,7 @@ func validatePercentileMetric(t *testing.T, tCtx *ottlmetric.TransformContext, o
 	gaugeDataPoint := percentileMetric.Gauge().DataPoints().At(0)
 	assert.InDelta(t, expectedValue, gaugeDataPoint.DoubleValue(), 0.0001, "percentile value should match expected")
 
-	var originalDataPoint dataPoint[any]
+	var originalDataPoint dataPoint
 	switch originalMetric.Type() {
 	case pmetric.MetricTypeHistogram:
 		originalDataPoint = originalMetric.Histogram().DataPoints().At(0)

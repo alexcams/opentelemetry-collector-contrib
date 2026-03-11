@@ -83,7 +83,7 @@ func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (
 	}, nil
 }
 
-func extractPercentileFromDataPoints[T dataPoint[T]](dataPoints dataPointSlice[T], percentile float64, destination pmetric.NumberDataPointSlice, calculateFunc func(T, float64) float64) {
+func extractPercentileFromDataPoints[T dataPoint](dataPoints dataPointSlice[T], percentile float64, destination pmetric.NumberDataPointSlice, calculateFunc func(T, float64) float64) {
 	for i := range dataPoints.Len() {
 		dp := dataPoints.At(i)
 		percentileValue := calculateFunc(dp, percentile)
@@ -91,7 +91,7 @@ func extractPercentileFromDataPoints[T dataPoint[T]](dataPoints dataPointSlice[T
 	}
 }
 
-func addPercentileDataPoint[T dataPoint[T]](sourceDP T, percentileValue float64, destination pmetric.NumberDataPointSlice) {
+func addPercentileDataPoint[T dataPoint](sourceDP T, percentileValue float64, destination pmetric.NumberDataPointSlice) {
 	newDp := destination.AppendEmpty()
 	sourceDP.Attributes().CopyTo(newDp.Attributes())
 	if math.IsNaN(percentileValue) {
