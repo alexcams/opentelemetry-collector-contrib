@@ -50,9 +50,17 @@ func extractPercentileMetric(percentile float64, suffix ottl.Optional[string]) (
 	return func(_ context.Context, tCtx *ottlmetric.TransformContext) (any, error) {
 		metric := tCtx.GetMetric()
 
-		if metric.Type() != pmetric.MetricTypeHistogram &&
-			metric.Type() != pmetric.MetricTypeExponentialHistogram {
-			return nil, nil // Execute only for histogram types.
+		switch metric.Type() {
+		case pmetric.MetricTypeHistogram:
+			if metric.Histogram().DataPoints().Len() == 0 {
+				return nil, nil
+			}
+		case pmetric.MetricTypeExponentialHistogram:
+			if metric.ExponentialHistogram().DataPoints().Len() == 0 {
+				return nil, nil
+			}
+		default:
+			return nil, nil
 		}
 
 		percentileMetric := pmetric.NewMetric()
