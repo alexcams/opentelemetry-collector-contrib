@@ -75,12 +75,8 @@ func newLogsReceiver(config *Config, set receiver.Settings, nextConsumer consume
 		if err != nil {
 			return nil, err
 		}
-		if config.Logs.topicAlias != "" {
-			set.Logger.Warn("logs.topic is deprecated, please use logs.topics instead")
-		}
-		if config.Logs.excludeTopicAlias != "" {
-			set.Logger.Warn("logs.exclude_topic is deprecated, please use logs.exclude_topics instead")
-		}
+
+		headerAttrKeys := buildHeaderAttrKeys(config)
 		return func(ctx context.Context, message kafkaMessage, attrs attribute.Set) error {
 			return processMessage(ctx, message, config, set.Logger, telBldr,
 				&logsHandler{
@@ -90,6 +86,7 @@ func newLogsReceiver(config *Config, set receiver.Settings, nextConsumer consume
 					encoding:    config.Logs.Encoding,
 				},
 				attrs,
+				headerAttrKeys,
 			)
 		}, nil
 	}
@@ -105,13 +102,8 @@ func newMetricsReceiver(config *Config, set receiver.Settings, nextConsumer cons
 		if err != nil {
 			return nil, err
 		}
-		if config.Metrics.topicAlias != "" {
-			set.Logger.Warn("metrics.topic is deprecated, please use metrics.topics instead")
-		}
-		if config.Metrics.excludeTopicAlias != "" {
-			set.Logger.Warn("metrics.exclude_topic is deprecated, please use metrics.exclude_topics instead")
-		}
 
+		headerAttrKeys := buildHeaderAttrKeys(config)
 		return func(ctx context.Context, message kafkaMessage, attrs attribute.Set) error {
 			return processMessage(ctx, message, config, set.Logger, telBldr,
 				&metricsHandler{
@@ -121,6 +113,7 @@ func newMetricsReceiver(config *Config, set receiver.Settings, nextConsumer cons
 					encoding:    config.Metrics.Encoding,
 				},
 				attrs,
+				headerAttrKeys,
 			)
 		}, nil
 	}
@@ -137,13 +130,7 @@ func newTracesReceiver(config *Config, set receiver.Settings, nextConsumer consu
 			return nil, err
 		}
 
-		if config.Traces.topicAlias != "" {
-			set.Logger.Warn("traces.topic is deprecated, please use traces.topics instead")
-		}
-		if config.Traces.excludeTopicAlias != "" {
-			set.Logger.Warn("traces.exclude_topic is deprecated, please use traces.exclude_topics instead")
-		}
-
+		headerAttrKeys := buildHeaderAttrKeys(config)
 		return func(ctx context.Context, message kafkaMessage, attrs attribute.Set) error {
 			return processMessage(ctx, message, config, set.Logger, telBldr,
 				&tracesHandler{
@@ -153,6 +140,7 @@ func newTracesReceiver(config *Config, set receiver.Settings, nextConsumer consu
 					encoding:    config.Traces.Encoding,
 				},
 				attrs,
+				headerAttrKeys,
 			)
 		}, nil
 	}
@@ -168,13 +156,8 @@ func newProfilesReceiver(config *Config, set receiver.Settings, nextConsumer xco
 		if err != nil {
 			return nil, err
 		}
-		if config.Profiles.topicAlias != "" {
-			set.Logger.Warn("profiles.topic is deprecated, please use profiles.topics instead")
-		}
-		if config.Profiles.excludeTopicAlias != "" {
-			set.Logger.Warn("profiles.exclude_topic is deprecated, please use profiles.exclude_topics instead")
-		}
 
+		headerAttrKeys := buildHeaderAttrKeys(config)
 		return func(ctx context.Context, message kafkaMessage, attrs attribute.Set) error {
 			return processMessage(ctx, message, config, set.Logger, telBldr,
 				&profilesHandler{
@@ -184,6 +167,7 @@ func newProfilesReceiver(config *Config, set receiver.Settings, nextConsumer xco
 					encoding:    config.Profiles.Encoding,
 				},
 				attrs,
+				headerAttrKeys,
 			)
 		}, nil
 	}
@@ -376,6 +360,7 @@ func processMessage[T plog.Logs | pmetric.Metrics | ptrace.Traces | pprofile.Pro
 	telBldr *metadata.TelemetryBuilder,
 	handler messageHandler[T],
 	attrs attribute.Set,
+	headerAttrKeys map[string]string,
 ) error {
 	if logger.Core().Enabled(zap.DebugLevel) {
 		logger.Debug("kafka message received",
@@ -402,7 +387,7 @@ func processMessage[T plog.Logs | pmetric.Metrics | ptrace.Traces | pprofile.Pro
 	// Add resource attributes from headers if configured
 	if config.HeaderExtraction.ExtractHeaders {
 		for key, value := range getMessageHeaderResourceAttributes(
-			message.headers(), config.HeaderExtraction.Headers,
+			message.headers(), headerAttrKeys,
 		) {
 			for resource := range handler.getResources(data) {
 				resource.Attributes().PutStr(key, value)
@@ -415,18 +400,32 @@ func processMessage[T plog.Logs | pmetric.Metrics | ptrace.Traces | pprofile.Pro
 	return err
 }
 
-func getMessageHeaderResourceAttributes(h messageHeaders, resHeaders []string) iter.Seq2[string, string] {
+func getMessageHeaderResourceAttributes(h messageHeaders, headerKeys map[string]string) iter.Seq2[string, string] {
 	return func(yield func(string, string) bool) {
-		for _, resHeader := range resHeaders {
-			value, ok := h.get(resHeader)
+		for rawKey, attrKey := range headerKeys {
+			value, ok := h.get(rawKey)
 			if !ok {
 				continue
 			}
-			if !yield("kafka.header."+resHeader, value) {
+			if !yield(attrKey, value) {
 				return
 			}
 		}
 	}
+}
+
+// buildHeaderAttrKeys pre-computes the mapping from raw header names to their
+// "kafka.header." prefixed attribute keys. Returns nil when header extraction
+// is disabled.
+func buildHeaderAttrKeys(config *Config) map[string]string {
+	if !config.HeaderExtraction.ExtractHeaders {
+		return nil
+	}
+	m := make(map[string]string, len(config.HeaderExtraction.Headers))
+	for _, h := range config.HeaderExtraction.Headers {
+		m[h] = "kafka.header." + h
+	}
+	return m
 }
 
 func newExponentialBackOff(config configretry.BackOffConfig) *backoff.ExponentialBackOff {
@@ -444,14 +443,12 @@ func newExponentialBackOff(config configretry.BackOffConfig) *backoff.Exponentia
 }
 
 func contextWithHeaders(ctx context.Context, headers messageHeaders) context.Context {
-	m := make(map[string][]string)
-	for header := range headers.all() {
-		key := header.key
-		value := string(header.value)
-		m[key] = append(m[key], value)
-	}
-	if len(m) == 0 {
+	if headers.len() == 0 {
 		return ctx
+	}
+	m := make(map[string][]string, headers.len())
+	for header := range headers.all() {
+		m[header.key] = append(m[header.key], string(header.value))
 	}
 	return client.NewContext(ctx, client.Info{Metadata: client.NewMetadata(m)})
 }
