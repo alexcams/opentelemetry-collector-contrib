@@ -123,23 +123,58 @@ func Test_createExtractPercentileMetricFunction(t *testing.T) {
 	}
 }
 
-func Test_extractPercentileMetric_NonHistogramType(t *testing.T) {
-	metric := pmetric.NewMetric()
-	metric.SetName("test_gauge")
-	metric.SetEmptyGauge().DataPoints().AppendEmpty().SetDoubleValue(42.0)
+func Test_extractPercentileMetric_SkippedMetricTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		metric func() pmetric.Metric
+	}{
+		{
+			name: "non-histogram type (gauge)",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("test_gauge")
+				m.SetEmptyGauge().DataPoints().AppendEmpty().SetDoubleValue(42.0)
+				return m
+			},
+		},
+		{
+			name: "empty histogram",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("empty_histogram")
+				m.SetEmptyHistogram()
+				return m
+			},
+		},
+		{
+			name: "empty exponential histogram",
+			metric: func() pmetric.Metric {
+				m := pmetric.NewMetric()
+				m.SetName("empty_exp_histogram")
+				m.SetEmptyExponentialHistogram()
+				return m
+			},
+		},
+	}
 
-	exprFunc, err := extractPercentileMetric(50.0, ottl.Optional[string]{})
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metric := tt.metric()
 
-	scopeMetrics := pmetric.NewScopeMetrics()
-	metric.CopyTo(scopeMetrics.Metrics().AppendEmpty())
+			exprFunc, err := extractPercentileMetric(50.0, ottl.Optional[string]{})
+			require.NoError(t, err)
 
-	tCtx := ottlmetric.NewTransformContextPtr(pmetric.NewResourceMetrics(), scopeMetrics, metric)
+			scopeMetrics := pmetric.NewScopeMetrics()
+			metric.CopyTo(scopeMetrics.Metrics().AppendEmpty())
 
-	_, err = exprFunc(t.Context(), tCtx)
-	require.NoError(t, err)
+			tCtx := ottlmetric.NewTransformContextPtr(pmetric.NewResourceMetrics(), scopeMetrics, metric)
 
-	assert.Equal(t, 1, tCtx.GetMetrics().Len(), "should only have original metric")
+			_, err = exprFunc(t.Context(), tCtx)
+			require.NoError(t, err)
+
+			assert.Equal(t, 1, tCtx.GetMetrics().Len(), "should only have original metric")
+		})
+	}
 }
 
 func Test_extractPercentileMetric_Histogram(t *testing.T) {
