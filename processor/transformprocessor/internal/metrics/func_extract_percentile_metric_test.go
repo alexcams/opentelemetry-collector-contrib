@@ -537,6 +537,8 @@ func validatePercentileMetric(t *testing.T, tCtx *ottlmetric.TransformContext, o
 		originalDataPoint = originalMetric.Histogram().DataPoints().At(0)
 	case pmetric.MetricTypeExponentialHistogram:
 		originalDataPoint = originalMetric.ExponentialHistogram().DataPoints().At(0)
+	default:
+		t.Fatalf("unexpected metric type: %s", originalMetric.Type())
 	}
 
 	assert.Equal(t, originalDataPoint.Attributes().Len(), gaugeDataPoint.Attributes().Len(), "attributes should be copied")
