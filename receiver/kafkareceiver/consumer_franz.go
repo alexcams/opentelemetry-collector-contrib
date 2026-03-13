@@ -49,11 +49,20 @@ type franzConsumer struct {
 	client      *kgo.Client
 	obsrecv     *receiverhelper.ObsReport
 	assignments map[topicPartition]*pc
+	partWG      sync.WaitGroup // tracks all partition consumer goroutines
 
 	// ---- status reporting ----
 	host         component.Host
 	stoppingOnce sync.Once
 	stoppedOnce  sync.Once
+}
+
+// partitionRecords holds a batch of records dispatched to a partition consumer.
+type partitionRecords struct {
+	records       []*kgo.Record
+	highWatermark int64
+	topic         string
+	partition     int32
 }
 
 // pc represents the partition consumer shared information.
@@ -66,42 +75,17 @@ type pc struct {
 	// Not safe for concurrent use, this field is never accessed concurrently.
 	backOff *backoff.ExponentialBackOff
 
-	mu sync.RWMutex // protects the fields below
-	// wg tracks the number of in-flight message processing goroutines for this
-	// partition. The wg must not be used directly; instead, the helper methods
-	// add() and done() should be called to safely mutate it. These methods ensure
-	// that no new goroutines are added once the partition consumer is stopping
-	// (i.e. after the partition is lost / revoked).
-	wg sync.WaitGroup
+	// records is a channel used to dispatch fetched records to the
+	// partition's long-lived consumer goroutine. The channel is closed
+	// when the partition is lost/revoked to signal the goroutine to exit.
+	records chan partitionRecords
+
+	// done is closed when the partition's consumer goroutine exits.
+	done chan struct{}
 }
 
-// add increments the wait group counter if the partition consumer is not
-// stopping. It returns true if the counter was incremented, false otherwise.
-func (p *pc) add(delta int) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	select {
-	case <-p.ctx.Done():
-		return false
-	default:
-	}
-	p.wg.Add(delta)
-	return true
-}
-
-// cancelContext cancels the partition consumer context while holding the write
-// lock.
-func (p *pc) cancelContext(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.cancel(err)
-}
-
-// done decrements the wait group counter.
-func (p *pc) done() { p.wg.Done() }
-
-// wait waits for all in-flight goroutines to finish.
-func (p *pc) wait() { p.wg.Wait() }
+// wait blocks until the partition's consumer goroutine has exited.
+func (p *pc) wait() { <-p.done }
 
 // newFranzKafkaConsumer creates a new franz-go based Kafka consumer
 func newFranzKafkaConsumer(
@@ -274,9 +258,8 @@ func (c *franzConsumer) consume(ctx context.Context, size int) bool {
 	maps.Copy(assignments, c.assignments)
 	c.mu.RUnlock()
 
-	var wg sync.WaitGroup
-	// Process messages on a per partition basis, wait for them to finish and
-	// commit the processed records (if autocommit is disabled).
+	// Dispatch records to each partition's consumer goroutine via its channel.
+	// This is non-blocking: each partition processes independently.
 	fetch.EachPartition(func(p kgo.FetchTopicPartition) {
 		count := len(p.Records)
 		if count == 0 {
@@ -294,89 +277,25 @@ func (c *franzConsumer) consume(ctx context.Context, size int) bool {
 			)
 			return
 		}
-		// Try to add a new in-flight message processing goroutine to the
-		// partition consumer. Return immediately if the partition has been
-		// lost or reassigned.
-		if !assign.add(1) {
-			return
-		}
-		wg.Add(1)
-		assign.logger.Debug("processing fetched records",
+		assign.logger.Debug("dispatching fetched records to partition consumer",
 			zap.Int("count", count),
 			zap.Int64("start_offset", p.Records[0].Offset),
 			zap.Int64("end_offset", p.Records[count-1].Offset),
 		)
-		go func(pc *pc, msgs []*kgo.Record) {
-			defer wg.Done()
-			defer pc.done()
-			fatalOffset := int64(-1)
-			var lastProcessed *kgo.Record
-			for _, msg := range msgs {
-				if !c.config.MessageMarking.After {
-					c.client.MarkCommitRecords(msg)
-				}
-				c.telemetryBuilder.KafkaReceiverCurrentOffset.Record(ctx, msg.Offset, metric.WithAttributeSet(pc.attrs))
-				if err := c.handleMessage(pc, wrapFranzMsg(msg)); err != nil {
-					pc.logger.Error("unable to process message",
-						zap.Error(err),
-						zap.Int64("offset", msg.Offset),
-					)
-					// Pause consumption for partitions that have fatal errors,
-					// which isn't ideal since there needs to be some sort of manual
-					// intervention to unlock the partition.
-					isPermanent := consumererror.IsPermanent(err)
-					shouldMark := (!isPermanent && c.config.MessageMarking.OnError) || (isPermanent && c.config.MessageMarking.OnPermanentError)
-
-					if !shouldMark {
-						fatalOffset = msg.Offset
-						break // Stop processing messages.
-					}
-				}
-				lastProcessed = msg // Store so we can commit later.
-			}
-			// Pause topic/partition processing locally, any rebalances that move
-			// away the process the partition regularly, which will re-process
-			// the message.
-			if fatalOffset > -1 {
-				c.client.PauseFetchPartitions(map[string][]int32{
-					p.Topic: {p.Partition},
-				})
-				// We don't return false since we want to avoid shutting down
-				// the consumer loop and consumption due to message poisoning.
-				// If we did, we would cause an eventual systematic failure if
-				// there are more topic / partitions in this consumer group when
-				// the partition is rebalanced to another consumer in the group.
-				//
-				// Ideally, we would attempt to re-process permanent errors
-				// for up to N times and then pause processing, or even better,
-				// produce the message to a dead letter topic.
-				pc.logger.Error("unable to process message: pausing consumption of this topic / partition on this consumer instance due to message_marking configuration",
-					zap.Int64("offset", fatalOffset),
-				)
-			}
-			if lastProcessed == nil {
-				return // No metrics nor marks to update.
-			}
-			// Otherwise, publish consumer lag.
-			c.telemetryBuilder.KafkaReceiverOffsetLag.Record(
-				context.Background(),
-				(p.HighWatermark-1)-(lastProcessed.Offset),
-				metric.WithAttributeSet(pc.attrs),
-			)
-			if c.config.MessageMarking.After {
-				c.client.MarkCommitRecords(lastProcessed)
-			}
-		}(assign, p.Records)
-	})
-	// Wait for all records to be processed and commit if autocommit=false.
-	wg.Wait()
-	if !c.config.AutoCommit.Enable {
-		if err := c.client.CommitMarkedOffsets(ctx); err != nil {
-			c.settings.Logger.Error("failed to commit offsets", zap.Error(err))
-			// Surface as recoverable error.
-			c.reportRecoverable(err)
+		// Send records to the partition's channel. If the partition has
+		// been lost (context cancelled / channel closed), this select
+		// will fall through without blocking.
+		select {
+		case assign.records <- partitionRecords{
+			records:       p.Records,
+			highWatermark: p.HighWatermark,
+			topic:         p.Topic,
+			partition:     p.Partition,
+		}:
+		case <-assign.ctx.Done():
+			assign.logger.Debug("partition context done, skipping dispatch")
 		}
-	}
+	})
 	return true
 }
 
@@ -397,6 +316,12 @@ func (c *franzConsumer) Shutdown(ctx context.Context) error {
 		return context.Cause(ctx)
 	case <-c.consumerClosed:
 	}
+
+	// Wait for all partition consumer goroutines to exit. At this point,
+	// the client has been closed and all partition contexts have been
+	// cancelled via the lost/revoked callbacks, so goroutines will drain
+	// and exit.
+	c.partWG.Wait()
 
 	return nil
 }
@@ -428,6 +353,93 @@ func (c *franzConsumer) triggerShutdown() bool {
 	return true
 }
 
+// partitionConsumeLoop is a long-lived goroutine that processes records for a
+// single partition. It reads batches from the partition's channel and processes
+// each record sequentially within the partition. The goroutine exits when the
+// context is cancelled (partition lost/revoked) or the channel is closed
+// (during shutdown cleanup).
+func (c *franzConsumer) partitionConsumeLoop(p *pc) {
+	defer c.partWG.Done()
+	defer close(p.done)
+	for {
+		select {
+		case batch, ok := <-p.records:
+			if !ok {
+				return // Channel closed, exit the goroutine.
+			}
+			c.processPartitionBatch(p, batch)
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+// processPartitionBatch processes a batch of records for a single partition.
+func (c *franzConsumer) processPartitionBatch(p *pc, batch partitionRecords) {
+	fatalOffset := int64(-1)
+	var lastProcessed *kgo.Record
+	for _, msg := range batch.records {
+		if !c.config.MessageMarking.After {
+			c.client.MarkCommitRecords(msg)
+		}
+		c.telemetryBuilder.KafkaReceiverCurrentOffset.Record(p.ctx, msg.Offset, metric.WithAttributeSet(p.attrs))
+		if err := c.handleMessage(p, wrapFranzMsg(msg)); err != nil {
+			p.logger.Error("unable to process message",
+				zap.Error(err),
+				zap.Int64("offset", msg.Offset),
+			)
+			// Pause consumption for partitions that have fatal errors,
+			// which isn't ideal since there needs to be some sort of manual
+			// intervention to unlock the partition.
+			isPermanent := consumererror.IsPermanent(err)
+			shouldMark := (!isPermanent && c.config.MessageMarking.OnError) || (isPermanent && c.config.MessageMarking.OnPermanentError)
+
+			if !shouldMark {
+				fatalOffset = msg.Offset
+				break
+			}
+		}
+		lastProcessed = msg
+	}
+	// Pause topic/partition processing locally, any rebalances that move
+	// away the process the partition regularly, which will re-process
+	// the message.
+	if fatalOffset > -1 {
+		c.client.PauseFetchPartitions(map[string][]int32{
+			batch.topic: {batch.partition},
+		})
+		// We don't return false since we want to avoid shutting down
+		// the consumer loop and consumption due to message poisoning.
+		// If we did, we would cause an eventual systematic failure if
+		// there are more topic / partitions in this consumer group when
+		// the partition is rebalanced to another consumer in the group.
+		//
+		// Ideally, we would attempt to re-process permanent errors
+		// for up to N times and then pause processing, or even better,
+		// produce the message to a dead letter topic.
+		p.logger.Error("unable to process message: pausing consumption of this topic / partition on this consumer instance due to message_marking configuration",
+			zap.Int64("offset", fatalOffset),
+		)
+	}
+	if lastProcessed == nil {
+		return // No metrics nor marks to update.
+	}
+	c.telemetryBuilder.KafkaReceiverOffsetLag.Record(
+		context.Background(),
+		(batch.highWatermark-1)-(lastProcessed.Offset),
+		metric.WithAttributeSet(p.attrs),
+	)
+	if c.config.MessageMarking.After {
+		c.client.MarkCommitRecords(lastProcessed)
+	}
+	if !c.config.AutoCommit.Enable {
+		if err := c.client.CommitMarkedOffsets(p.ctx); err != nil {
+			c.settings.Logger.Error("failed to commit offsets", zap.Error(err))
+			c.reportRecoverable(err)
+		}
+	}
+}
+
 // assigned must be set as kgo.OnPartitionsAssigned callback. Ensuring all
 // assigned partitions to this consumer process received records.
 func (c *franzConsumer) assigned(ctx context.Context, _ *kgo.Client, assigned map[string][]int32) {
@@ -451,7 +463,12 @@ func (c *franzConsumer) assigned(ctx context.Context, _ *kgo.Client, assigned ma
 				),
 			}
 			partitionConsumer.ctx, partitionConsumer.cancel = context.WithCancelCause(ctx)
+			partitionConsumer.records = make(chan partitionRecords, 1)
+			partitionConsumer.done = make(chan struct{})
 			c.assignments[topicPartition{topic: topic, partition: partition}] = &partitionConsumer
+			// Start a long-lived goroutine for this partition.
+			c.partWG.Add(1)
+			go c.partitionConsumeLoop(&partitionConsumer)
 		}
 	}
 }
@@ -479,10 +496,10 @@ func (c *franzConsumer) lost(ctx context.Context, _ *kgo.Client,
 			// balancer on topic lost/deleted.
 			if pc, ok := c.assignments[tp]; ok {
 				delete(c.assignments, tp)
-				// Cancel also locks the partition consumer. This ensures that
-				// the partition consumer stops processing messages when the
-				// partition is lost or reassigned.
-				pc.cancelContext(errors.New(
+				// Cancel the context to signal the partition's goroutine to stop.
+				// We do NOT close the channel here because consume() may still
+				// hold a reference to this pc and attempt to send on it.
+				pc.cancel(errors.New(
 					"stopping processing: partition reassigned or lost",
 				))
 				wg.Go(func() {

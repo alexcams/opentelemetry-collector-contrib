@@ -251,9 +251,10 @@ func TestConsumerShutdownNotStarted(t *testing.T) {
 }
 
 // TestRaceLostVsConsume verifies no data race occurs between concurrent
-// message processing (which calls pc.add / pc.done) and partition revocation
-// handling (lost() → pc.wait). It spins up a kfake cluster, floods them with
-// records, and repeatedly invokes lost() while consumption is in-flight.
+// message consumption and partition changes. It spins up a kfake cluster,
+// floods it with records, and repeatedly adds partitions (which triggers
+// assigned() via the franz-go protocol) while manually calling lost() to
+// simulate revocation concurrently with consumption.
 func TestRaceLostVsConsume(t *testing.T) {
 	topic := "otlp_spans"
 	kafkaClient, cfg := mustNewFakeCluster(t, kfake.SeedTopics(1, topic))
@@ -285,15 +286,18 @@ func TestRaceLostVsConsume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.Start(t.Context(), componenttest.NewNopHost()))
 
+	admin := kadm.NewClient(kafkaClient)
 	done := make(chan struct{})
-	// Hammer lost/assigned and rebalance in a goroutine.
 	go func() {
 		defer close(done)
-		topicMap := map[string][]int32{topic: {0}}
+		lostM := map[string][]int32{topic: {0}}
 		for range 2000 {
-			c.lost(t.Context(), nil, topicMap, false)
-			c.assigned(t.Context(), kafkaClient, topicMap)
-			c.client.ForceRebalance()
+			// Add a partition — franz-go will detect the new partition via
+			// metadata refresh and call assigned() automatically.
+			_, _ = admin.CreatePartitions(t.Context(), 1, topic)
+
+			// Manually call lost() to race against consume().
+			c.lost(t.Context(), nil, lostM, false)
 		}
 	}()
 
