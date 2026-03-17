@@ -367,7 +367,7 @@ Examples:
 
 The `extract_percentile_metric` function creates a new Gauge metric from a Histogram or ExponentialHistogram by calculating the specified percentile value from the bucket counts. A metric will only be created if there is at least one data point.
 
-`percentile` is a float64 value between 0 and 100 representing the desired percentile to extract (e.g., 50 for median, 95 for p95, 99 for p99).
+`percentile` is a float64 value greater than 0 and less than 100 representing the desired percentile to extract (e.g., 50 for median, 95 for p95, 99 for p99).
 
 `suffix` is an optional string that defines the suffix for the metric name. By default, it is set to `_p{percentile}` (e.g., `_p50`, `_p95`, `_p99`).
 
