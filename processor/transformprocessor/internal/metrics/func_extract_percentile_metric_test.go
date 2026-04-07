@@ -308,6 +308,29 @@ func Test_extractPercentileMetric_Histogram(t *testing.T) {
 			wantValue:  10.0,
 		},
 		{
+			name: "single bucket no bounds with min and max",
+			histogramConfig: histogramConfig{
+				name:         "no_bounds",
+				count:        100,
+				bucketCounts: []uint64{100},
+				min:          ottl.NewTestingOptional(5.0),
+				max:          ottl.NewTestingOptional(25.0),
+			},
+			percentile: 50.0,
+			wantSuffix: "_p50",
+			wantValue:  15.0, // Interpolates between min (5) and max (25)
+		},
+		{
+			name: "skip: single bucket no bounds without min/max",
+			histogramConfig: histogramConfig{
+				name:         "no_bounds_no_minmax",
+				count:        100,
+				bucketCounts: []uint64{100},
+			},
+			percentile: 50.0,
+			wantSkip:   true,
+		},
+		{
 			name: "first bucket with negative bound and no min",
 			histogramConfig: histogramConfig{
 				name:           "all_negative",

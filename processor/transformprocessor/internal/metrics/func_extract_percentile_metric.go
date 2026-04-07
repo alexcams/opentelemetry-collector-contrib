@@ -135,6 +135,16 @@ func calculateHistogramPercentile(dp pmetric.HistogramDataPoint, percentile floa
 			bucketCounts.Len(), explicitBounds.Len())
 	}
 
+	// Single-bucket histogram with no explicit bounds: spans (-Inf, +Inf).
+	// Both Min and Max are required for meaningful interpolation.
+	if bucketCounts.Len() == 1 && explicitBounds.Len() == 0 {
+		if !dp.HasMin() || !dp.HasMax() {
+			return 0, errSkipDataPoint
+		}
+		ratio := float64(targetCount) / float64(bucketCounts.At(0))
+		return linearInterpolation(dp.Min(), dp.Max(), ratio)
+	}
+
 	var cumulativeCount uint64
 	for bucketIdx := range bucketCounts.Len() {
 		previousCumulativeCount := cumulativeCount
