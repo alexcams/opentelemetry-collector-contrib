@@ -409,14 +409,8 @@ func (s *StatementSequence[K]) executeStatementWithTracing(ctx context.Context, 
 	_, condition, err := statement.Execute(statementCtx, tCtx)
 
 	statementSpan.SetAttributes(
-		attribute.KeyValue{
-			Key:   "statement",
-			Value: attribute.StringValue(statement.origText),
-		},
-		attribute.KeyValue{
-			Key:   "condition.matched",
-			Value: attribute.BoolValue(condition),
-		},
+		attribute.String("statement", statement.origText),
+		attribute.Bool("condition.matched", condition),
 	)
 
 	if err != nil {
@@ -429,9 +423,8 @@ func (s *StatementSequence[K]) executeStatementWithTracing(ctx context.Context, 
 		}
 		if s.errorMode == IgnoreError {
 			s.telemetrySettings.Logger.Warn(
-				"failed to execute statement",
+				"failed statement execution error",
 				zap.Error(err),
-				zap.String("statement", statement.origText),
 				zap.String("trace_id", statementSpan.SpanContext().TraceID().String()),
 				zap.String("span_id", statementSpan.SpanContext().SpanID().String()),
 			)
@@ -446,11 +439,11 @@ func (s *StatementSequence[K]) executeStatement(ctx context.Context, tCtx K, sta
 	_, _, err := statement.Execute(ctx, tCtx)
 	if err != nil {
 		if s.errorMode == PropagateError {
-			return fmt.Errorf("failed to execute statement: %v, %w", statement.origText, err)
+			return fmt.Errorf("failed to execute statement '%s': %w", statement.origText, err)
 		}
 		if s.errorMode == IgnoreError {
 			s.telemetrySettings.Logger.Warn(
-				"failed to execute statement",
+				"failed statement execution error",
 				zap.Error(err),
 				zap.String("statement", statement.origText),
 			)
