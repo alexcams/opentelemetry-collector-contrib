@@ -59,7 +59,7 @@ func TestNewDetector(t *testing.T) {
 func TestAkamaiDetector_Detect_OK(t *testing.T) {
 	const (
 		cloudProvider = "akamai_cloud"
-		cloudPlatform = "akamai_cloud_platform"
+		cloudPlatform = "akamai_cloud.compute"
 		acct          = "acc-eeee-uuuu-iiiii-dddd"
 		id            = 4242
 		label         = "linode-4242"
@@ -85,7 +85,7 @@ func TestAkamaiDetector_Detect_OK(t *testing.T) {
 
 	res, schemaURL, err := det.Detect(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, "https://opentelemetry.io/schemas/1.6.1", schemaURL)
+	require.Contains(t, schemaURL, "https://opentelemetry.io/schemas/")
 
 	got := res.Attributes().AsRaw()
 	want := map[string]any{

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	gojson "github.com/goccy/go-json"
-	"github.com/iancoleman/strcase"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	conventions "go.opentelemetry.io/otel/semconv/v1.38.0"
@@ -22,6 +21,8 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/apploadbalancerlog"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/auditlog"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/constants"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/dnslog"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/passthroughnlb"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/proxynlb"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/shared"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/googlecloudlogentryencodingextension/internal/vpcflowlog"
@@ -82,6 +83,10 @@ func getEncodingFormat(logType string) string {
 		return constants.GCPFormatLoadBalancerLog
 	case proxynlb.ConnectionsLogNameSuffix:
 		return constants.GCPFormatProxyNLBLog
+	case dnslog.CloudDNSQueryLogSuffix:
+		return constants.GCPFormatDNSQueryLog
+	case passthroughnlb.ConnectionsLogNameSuffix:
+		return constants.GCPFormatPassthroughNLBLog
 	default:
 		return ""
 	}
@@ -512,6 +517,21 @@ func handlePayload(encodingFormat string, log logEntry, logRecord plog.LogRecord
 			return fmt.Errorf("failed to parse Proxy NLB log JSON payload: %w", err)
 		}
 		return nil
+	case constants.GCPFormatDNSQueryLog:
+		scope.Attributes().PutStr(constants.FormatIdentificationTag, encodingFormat)
+		if err := dnslog.ParsePayloadIntoAttributes(log.JSONPayload, logRecord.Attributes()); err != nil {
+			return fmt.Errorf("failed to parse DNS Query log JSON payload: %w", err)
+		}
+		return nil
+
+	case constants.GCPFormatPassthroughNLBLog:
+		scope.Attributes().PutStr(constants.FormatIdentificationTag, encodingFormat)
+		if err := passthroughnlb.ParsePayloadIntoAttributes(log.JSONPayload, logRecord.Attributes()); err != nil {
+			return fmt.Errorf("failed to parse Passthrough NLB log JSON payload: %w", err)
+		}
+		return nil
+		// Fall through to default payload handling for non-armor load balancer logs
+		// TODO Add support for more log types
 	}
 
 	// if the log type was not recognized, add the payload to the log record body
@@ -572,7 +592,7 @@ func handleLogEntryFields(resourceAttributes pcommon.Map, scopeLogs plog.ScopeLo
 	if log.Resource != nil {
 		resourceAttributes.PutStr(gcpResourceTypeField, log.Resource.Type)
 		for k, v := range log.Resource.Labels {
-			resourceAttributes.PutStr(strcase.ToSnakeWithIgnore(fmt.Sprintf("gcp.label.%v", k), "."), v)
+			shared.PutStr(shared.ToSnakeCase(fmt.Sprintf("gcp.label.%s", k), "."), v, resourceAttributes)
 		}
 	}
 
@@ -603,7 +623,7 @@ func handleLogEntryFields(resourceAttributes pcommon.Map, scopeLogs plog.ScopeLo
 	}
 
 	for k, v := range log.Labels {
-		logRecord.Attributes().PutStr(strcase.ToSnakeWithIgnore(fmt.Sprintf("gcp.label.%v", k), "."), v)
+		logRecord.Attributes().PutStr(shared.ToSnakeCase(fmt.Sprintf("gcp.label.%v", k), "."), v)
 	}
 
 	handleOperationField(logRecord.Attributes(), log.Operation)
