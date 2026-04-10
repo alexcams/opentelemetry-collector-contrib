@@ -375,7 +375,7 @@ For backward compatibility, this default does not follow the [semantic naming co
 
 The name for the new metric will be `<original metric name><suffix>`. The fields that are copied are: `timestamp`, `starttimestamp`, `attributes`, `description`, and `unit`.
 
-For Histograms, the function uses linear interpolation within buckets to estimate the percentile value. For ExponentialHistograms, it uses logarithmic interpolation appropriate for the exponential bucket structure.
+For Histograms, the function uses linear interpolation within buckets to estimate the percentile value. Since the lowest bucket has no finite lower bound (`-Inf`), the function uses the data point's `Min` value when available. If `Min` is not set and the upper bound of that bucket is non-negative, the lower bound is assumed to be `0`. Similarly, if the percentile falls in the last bucket (`+Inf` upper bound), the data point's `Max` value is used for interpolation when available. For ExponentialHistograms, it uses logarithmic interpolation appropriate for the exponential bucket structure.
 
 The new metric that is created will be passed to all subsequent statements in the metrics statements list.
 

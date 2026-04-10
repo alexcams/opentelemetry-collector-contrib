@@ -236,22 +236,26 @@ func calculateFromZeroBucket(dp pmetric.ExponentialHistogramDataPoint, negativeB
 
 func calculateFromNegativeBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, previousCumulativeCount uint64, bucketIdx, scale int) (float64, error) {
 	bucketCount := buckets.BucketCounts().At(bucketIdx)
-	bucketIndex := int(buckets.Offset()) + bucketIdx
+	histogramIndex := int(buckets.Offset()) + bucketIdx
+	absLowerBound := calculateExponentialBucketBound(histogramIndex, scale)
+	absUpperBound := calculateExponentialBucketBound(histogramIndex+1, scale)
 
-	upperBound := calculateExponentialBucketBound(bucketIndex, scale)
-	lowerBound := calculateExponentialBucketBound(bucketIndex+1, scale)
-	if -upperBound <= -lowerBound {
-		return 0, fmt.Errorf("calculating exponential histogram percentile: malformed negative bucket bounds: -upperBound (%.6f) <= -lowerBound (%.6f) at bucketIndex=%d, scale=%d",
-			-upperBound, -lowerBound, bucketIndex, scale)
+	if absLowerBound >= absUpperBound {
+		return 0, fmt.Errorf(
+			"calculating exponential histogram percentile: malformed negative bucket bounds: absLowerBound (%.6f) >= absUpperBound (%.6f) at histogramIndex=%d, scale=%d",
+			absLowerBound, absUpperBound, histogramIndex, scale,
+		)
 	}
 
-	ratio := (float64(targetCount - previousCumulativeCount)) / float64(bucketCount)
-	// For negative buckets, invert ratio direction since we move from more negative to less negative.
-	val, err := logarithmicInterpolation(lowerBound, upperBound, ratio)
+	// ratio = 0 -> most-negative end of bucket (−absUpperBound)
+	// ratio = 1 -> least-negative end of bucket (−absLowerBound)
+	// Interpolating absUpper -> absLower and negating gives the correct direction.
+	ratio := float64(targetCount-previousCumulativeCount) / float64(bucketCount)
+	absValue, err := logarithmicInterpolation(absLowerBound, absUpperBound, 1-ratio)
 	if err != nil {
 		return 0, err
 	}
-	return -val, nil
+	return -absValue, nil
 }
 
 func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointBuckets, targetCount, cumulativeBefore uint64, scale int) (float64, error) {
@@ -264,9 +268,9 @@ func calculateFromPositiveBuckets(buckets pmetric.ExponentialHistogramDataPointB
 		cumulativeCount += bucketCount
 
 		if cumulativeCount >= targetCount {
-			bucketIndex := int(buckets.Offset()) + i
-			lowerBound := calculateExponentialBucketBound(bucketIndex, scale)
-			upperBound := calculateExponentialBucketBound(bucketIndex+1, scale)
+			histogramIndex := int(buckets.Offset()) + i
+			lowerBound := calculateExponentialBucketBound(histogramIndex, scale)
+			upperBound := calculateExponentialBucketBound(histogramIndex+1, scale)
 
 			ratio := float64(targetCount-previousCumulativeCount) / float64(bucketCount)
 			return logarithmicInterpolation(lowerBound, upperBound, ratio)
