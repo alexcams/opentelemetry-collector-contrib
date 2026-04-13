@@ -2763,17 +2763,19 @@ func Test_Statements_Execute_Error(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			telemetrySettings := componenttest.NewNopTelemetrySettings()
-			statements := []*Statement[any]{
-				{
-					condition:         tt.condition,
-					function:          Expr[any]{exprFunc: tt.function},
-					telemetrySettings: telemetrySettings,
+			statements := StatementSequence[any]{
+				statements: []*Statement[any]{
+					{
+						condition:         tt.condition,
+						function:          Expr[any]{exprFunc: tt.function},
+						telemetrySettings: componenttest.NewNopTelemetrySettings(),
+					},
 				},
+				errorMode:         tt.errorMode,
+				telemetrySettings: componenttest.NewNopTelemetrySettings(),
 			}
-			statementSeq := NewStatementSequence(statements, telemetrySettings, WithStatementSequenceErrorMode[any](tt.errorMode))
 
-			err := statementSeq.Execute(t.Context(), nil)
+			err := statements.Execute(t.Context(), nil)
 			if tt.errorMode == PropagateError {
 				assert.Error(t, err)
 			} else {

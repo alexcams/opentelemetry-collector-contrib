@@ -370,6 +370,7 @@ type StatementSequence[K any] struct {
 	errorMode         ErrorMode
 	telemetrySettings component.TelemetrySettings
 	tracer            trace.Tracer
+	tracing           bool
 }
 
 // StatementSequenceOption is an option for a StatementSequence
@@ -386,70 +387,22 @@ func WithStatementSequenceErrorMode[K any](errorMode ErrorMode) StatementSequenc
 // The default ErrorMode is `Propagate`.
 // You may also augment the StatementSequence with a slice of StatementSequenceOption.
 func NewStatementSequence[K any](statements []*Statement[K], telemetrySettings component.TelemetrySettings, options ...StatementSequenceOption[K]) StatementSequence[K] {
-	var tracer trace.Tracer = &noop.Tracer{}
-	if telemetrySettings.TracerProvider != nil {
-		tracer = telemetrySettings.TracerProvider.Tracer("ottl")
-	}
 	s := StatementSequence[K]{
 		statements:        statements,
 		errorMode:         PropagateError,
 		telemetrySettings: telemetrySettings,
-		tracer:            tracer,
 	}
 	for _, op := range options {
 		op(&s)
 	}
+	switch tp := telemetrySettings.TracerProvider.(type) {
+	case nil, noop.TracerProvider:
+		// do nothing - tracer remains nil, tracing stays false
+	default:
+		s.tracer = tp.Tracer("ottl")
+		s.tracing = true
+	}
 	return s
-}
-
-func (s *StatementSequence[K]) executeStatementWithTracing(ctx context.Context, tCtx K, statement *Statement[K], sequenceSpan trace.Span) error {
-	statementCtx, statementSpan := s.tracer.Start(ctx, "ottl/StatementExecution")
-	defer statementSpan.End()
-
-	_, condition, err := statement.Execute(statementCtx, tCtx)
-
-	statementSpan.SetAttributes(
-		attribute.String("statement", statement.origText),
-		attribute.Bool("condition.matched", condition),
-	)
-
-	if err != nil {
-		err = fmt.Errorf("failed to execute statement '%s': %w", statement.origText, err)
-		statementSpan.RecordError(err)
-		statementSpan.SetStatus(codes.Error, err.Error())
-		if s.errorMode == PropagateError {
-			sequenceSpan.SetStatus(codes.Error, err.Error())
-			return err
-		}
-		if s.errorMode == IgnoreError {
-			s.telemetrySettings.Logger.Warn(
-				"failed statement execution error",
-				zap.Error(err),
-				zap.String("trace_id", statementSpan.SpanContext().TraceID().String()),
-				zap.String("span_id", statementSpan.SpanContext().SpanID().String()),
-			)
-		}
-	} else {
-		statementSpan.SetStatus(codes.Ok, "statement executed successfully")
-	}
-	return nil
-}
-
-func (s *StatementSequence[K]) executeStatement(ctx context.Context, tCtx K, statement *Statement[K]) error {
-	_, _, err := statement.Execute(ctx, tCtx)
-	if err != nil {
-		if s.errorMode == PropagateError {
-			return fmt.Errorf("failed to execute statement '%s': %w", statement.origText, err)
-		}
-		if s.errorMode == IgnoreError {
-			s.telemetrySettings.Logger.Warn(
-				"failed statement execution error",
-				zap.Error(err),
-				zap.String("statement", statement.origText),
-			)
-		}
-	}
-	return nil
 }
 
 // Execute is a function that will execute all the statements in the StatementSequence list.
@@ -457,6 +410,13 @@ func (s *StatementSequence[K]) executeStatement(ctx context.Context, tCtx K, sta
 // When the ErrorMode of the StatementSequence is `ignore`, errors are logged and execution continues to the next statement.
 // When the ErrorMode of the StatementSequence is `silent`, errors are not logged and execution continues to the next statement.
 func (s *StatementSequence[K]) Execute(ctx context.Context, tCtx K) error {
+	if s.tracing {
+		return s.executeWithTracing(ctx, tCtx)
+	}
+	return s.executeWithoutTracing(ctx, tCtx)
+}
+
+func (s *StatementSequence[K]) executeWithTracing(ctx context.Context, tCtx K) error {
 	ctx, sequenceSpan := s.tracer.Start(ctx, "ottl/StatementSequenceExecution")
 	defer sequenceSpan.End()
 	if s.telemetrySettings.Logger.Core().Enabled(zap.DebugLevel) {
@@ -468,18 +428,63 @@ func (s *StatementSequence[K]) Execute(ctx context.Context, tCtx K) error {
 		)
 	}
 	for _, statement := range s.statements {
-		var err error
-		if sequenceSpan.IsRecording() {
-			err = s.executeStatementWithTracing(ctx, tCtx, statement, sequenceSpan)
-		} else {
-			// Fast path with no tracing overhead
-			err = s.executeStatement(ctx, tCtx, statement)
-		}
+		statementCtx, statementSpan := s.tracer.Start(ctx, "ottl/StatementExecution")
+
+		_, condition, err := statement.Execute(statementCtx, tCtx)
+
+		statementSpan.SetAttributes(
+			attribute.String("statement", statement.origText),
+			attribute.Bool("condition.matched", condition),
+		)
+
 		if err != nil {
-			return err
+			err = fmt.Errorf("failed to execute statement '%s': %w", statement.origText, err)
+			statementSpan.RecordError(err)
+			statementSpan.SetStatus(codes.Error, err.Error())
+			statementSpan.End()
+			if s.errorMode == PropagateError {
+				sequenceSpan.SetStatus(codes.Error, err.Error())
+				return err
+			}
+			if s.errorMode == IgnoreError {
+				s.telemetrySettings.Logger.Warn(
+					"failed statement execution error",
+					zap.Error(err),
+					zap.String("trace_id", statementSpan.SpanContext().TraceID().String()),
+					zap.String("span_id", statementSpan.SpanContext().SpanID().String()),
+				)
+			}
+		} else {
+			statementSpan.SetStatus(codes.Ok, "statement executed successfully")
+			statementSpan.End()
 		}
 	}
 	sequenceSpan.SetStatus(codes.Ok, "statement sequence executed successfully")
+	return nil
+}
+
+func (s *StatementSequence[K]) executeWithoutTracing(ctx context.Context, tCtx K) error {
+	if s.telemetrySettings.Logger.Core().Enabled(zap.DebugLevel) {
+		s.telemetrySettings.Logger.Debug(
+			"initial TransformContext before executing StatementSequence",
+			zap.Any("TransformContext", tCtx),
+		)
+	}
+	for _, statement := range s.statements {
+		_, _, err := statement.Execute(ctx, tCtx)
+		if err != nil {
+			if s.errorMode == PropagateError {
+				return fmt.Errorf("failed to execute statement '%s': %w", statement.origText, err)
+			}
+			if s.errorMode == IgnoreError {
+				s.telemetrySettings.Logger.Warn(
+					"failed statement execution error",
+					zap.Error(err),
+					zap.String("statement", statement.origText),
+				)
+			}
+		}
+	}
 	return nil
 }
 
