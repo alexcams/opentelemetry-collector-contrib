@@ -2786,16 +2786,6 @@ func Test_Statements_Execute_Error(t *testing.T) {
 }
 
 func TestStatementSequence_Execute_Tracing(t *testing.T) {
-	tracingTelemetrySettings := func() (component.TelemetrySettings, *tracetest.SpanRecorder) {
-		rec := tracetest.NewSpanRecorder()
-		set := componenttest.NewNopTelemetrySettings()
-		set.TracerProvider = trace.NewTracerProvider(
-			trace.WithSampler(trace.AlwaysSample()),
-			trace.WithSpanProcessor(rec),
-		)
-		return set, rec
-	}
-
 	tests := []struct {
 		name        string
 		statements  func(set component.TelemetrySettings) []*Statement[any]
@@ -2916,19 +2906,16 @@ func TestStatementSequence_Execute_Tracing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var set component.TelemetrySettings
-			var rec *tracetest.SpanRecorder
-
+			rec := tracetest.NewSpanRecorder()
+			set := componenttest.NewNopTelemetrySettings()
+			sampler := trace.AlwaysSample()
 			if tt.noTracing {
-				rec = tracetest.NewSpanRecorder()
-				set = componenttest.NewNopTelemetrySettings()
-				set.TracerProvider = trace.NewTracerProvider(
-					trace.WithSampler(trace.NeverSample()),
-					trace.WithSpanProcessor(rec),
-				)
-			} else {
-				set, rec = tracingTelemetrySettings()
+				sampler = trace.NeverSample()
 			}
+			set.TracerProvider = trace.NewTracerProvider(
+				trace.WithSampler(sampler),
+				trace.WithSpanProcessor(rec),
+			)
 
 			seq := NewStatementSequence(tt.statements(set), set, tt.options...)
 			err := seq.Execute(t.Context(), nil)
