@@ -443,7 +443,13 @@ func Test_newPathGetSetter_higherContextPath(t *testing.T) {
 	scope := pcommon.NewInstrumentationScope()
 	scope.SetName("instrumentation_scope")
 
-	ctx := NewTransformContextPtr(scope, resource, pmetric.NewScopeMetrics(), pmetric.NewResourceMetrics())
+	sm := pmetric.NewScopeMetrics()
+	sm.SetSchemaUrl("scope_schema")
+
+	rm := pmetric.NewResourceMetrics()
+	rm.SetSchemaUrl("resource_schema")
+
+	ctx := NewTransformContextPtr(scope, resource, sm, rm)
 	defer ctx.Close()
 
 	tests := []struct {
@@ -471,6 +477,25 @@ func Test_newPathGetSetter_higherContextPath(t *testing.T) {
 				},
 			}},
 			expected: "bar",
+		},
+		{
+			name: "scope schema_url",
+			path: &pathtest.Path[*TransformContext]{
+				N: "schema_url",
+			},
+			expected: "scope_schema",
+		},
+		{
+			name: "resource schema_url",
+			path: &pathtest.Path[*TransformContext]{C: "", N: "resource", NextPath: &pathtest.Path[*TransformContext]{
+				N: "schema_url",
+			}},
+			expected: "resource_schema",
+		},
+		{
+			name:     "resource schema_url with context",
+			path:     &pathtest.Path[*TransformContext]{C: "resource", N: "schema_url"},
+			expected: "resource_schema",
 		},
 	}
 
@@ -531,21 +556,4 @@ func createTelemetry() (pcommon.InstrumentationScope, pcommon.Resource) {
 	is.Attributes().CopyTo(resource.Attributes())
 
 	return is, resource
-}
-
-func Test_SchemaURLDistinction(t *testing.T) {
-	scope := pcommon.NewInstrumentationScope()
-	resource := pcommon.NewResource()
-
-	sm := pmetric.NewScopeMetrics()
-	sm.SetSchemaUrl("scope_schema")
-
-	rm := pmetric.NewResourceMetrics()
-	rm.SetSchemaUrl("resource_schema")
-
-	ctx := NewTransformContextPtr(scope, resource, sm, rm)
-	defer ctx.Close()
-
-	assert.Equal(t, "scope_schema", ctx.GetScopeSchemaURLItem().SchemaUrl())
-	assert.Equal(t, "resource_schema", ctx.GetResourceSchemaURLItem().SchemaUrl())
 }
