@@ -290,7 +290,7 @@ func Test_ParseXML(t *testing.T) {
 					},
 				},
 			},
-			parseError: "exceeded max xml nesting depth",
+			parseError: "exceeded maximum XML nesting depth",
 		},
 	}
 
