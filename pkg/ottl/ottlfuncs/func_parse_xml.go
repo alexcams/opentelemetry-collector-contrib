@@ -61,7 +61,7 @@ func parseXML[K any](target ottl.StringGetter[K]) ottl.ExprFunc[K] {
 	}
 }
 
-// maxXMLElementDepth mirrors encoding/json's maxNestingDepth to bound the
+// maxXMLElementDepth mirrors encoding/xml maxUnmarshalDepth to bound the
 // recursion depth of XML parsing input.
 const maxXMLElementDepth = 10_000
 
